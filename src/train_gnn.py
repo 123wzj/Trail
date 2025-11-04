@@ -3,6 +3,7 @@ from copy import deepcopy
 import math
 import pickle
 from types import SimpleNamespace
+import os
 
 import pandas as pd
 from sklearn.metrics import accuracy_score, balanced_accuracy_score, confusion_matrix
@@ -11,9 +12,9 @@ import torch
 from torch.optim import Adam
 from tqdm import tqdm
 
-from models.combo_gnn import SageClassifier
+from models.gnn import SageClassifier
 
-
+# CPU
 torch.set_num_threads(16)
 HYPERPARAMS = SimpleNamespace(
     icefog_fixed=True,
@@ -33,12 +34,14 @@ def train(hp, model, g, batch_tr, y_tr, batch_va, y_va, batch_te, y_te):
     best = {'e': -1, 'va': 0, 'te-acc': 0, 'te-bacc':0, 'sd': None}
     logs = []
 
+    # 第一步：保存原始标签
     original_y = deepcopy((g.event_ids, g.y))
 
     # Make sure model can only see classes of nodes it's not doing inference on
+    # 第二步：为训练集创建标签掩码
     tr_mask = ~((g.event_ids == batch_tr.unsqueeze(-1)).sum(dim=0).bool())
-    g_tr_y = g.y[tr_mask]
-    g_tr_ids = g.event_ids[tr_mask]
+    g_tr_y = g.y[tr_mask]  # 隐藏训练集标签   只保留非训练集的标签
+    g_tr_ids = g.event_ids[tr_mask]  # 对应的事件ID
 
     va_mask = ~((g.event_ids == batch_va.unsqueeze(-1)).sum(dim=0).bool())
     g_va_y = g.y[va_mask]
@@ -121,12 +124,17 @@ def eval(model, g, idx, y, print_mat=False):
     return acc, b_acc
 
 def get_and_split(dataset, folds=5, val=True):
-    g = torch.load(f'{dataset}/full_graph_csr.pt')
+    g = torch.load(f'{dataset}/full_graph_csr.pt', weights_only=False)
+    # 5折交叉验证
     kf = StratifiedKFold(n_splits=folds)
     kf_val = StratifiedKFold(n_splits=2)
 
     # Only eval on OTX so we can better compare results
-    valid_mask = (g.sources == g.src_map['OTX']).logical_and(g.y != -1)
+    valid_mask = (
+            g.sources == g.src_map['OTX']  # 来源必须是OTX
+    ).logical_and(
+        g.y != -1  # 标签必须有效（非未知）
+    )
 
     # Taken care of in graph construction now
     #num_neighbors = torch.tensor([len(n) for n in g.edge_csr[g.event_ids]])
@@ -135,8 +143,8 @@ def get_and_split(dataset, folds=5, val=True):
     valid_ids = g.event_ids[valid_mask]
     valid_ys = g.y[valid_mask]
 
-    other_ids = g.y[~valid_mask]
-    other_ys = g.y[~valid_mask]
+    other_ids = g.y[~valid_mask]  # 其他来源事件
+    other_ys = g.y[~valid_mask]  # 其他来源标签
 
     for tr,te in kf.split(valid_ids, valid_ys):
         if val:
@@ -162,7 +170,7 @@ def get_and_split(dataset, folds=5, val=True):
                 (tr_idx, tr_ys), \
                 (te_idx, valid_ys[te])
 
-def to_onehot(y, num_classes=22):
+def to_onehot(y, num_classes=24):
     y_onehot = torch.zeros(y.size(0), num_classes)
     y_onehot[torch.arange(y.size(0)), y.long()] = 1.
     return y_onehot
@@ -185,7 +193,16 @@ def get_final_preds(model, g, te_idx, te_y):
 
     return preds, te_y
 
+
 def main(hp):
+    base_dir = '/root/PythonProject/Trail-main/model_weights'
+
+    # 创建目录
+    os.makedirs(f'{base_dir}/weights/{hp.layers}-layer', exist_ok=True)
+    os.makedirs(f'{base_dir}/predictions/{hp.layers}-layer', exist_ok=True)
+    os.makedirs(f'{base_dir}/logs', exist_ok=True)
+    os.makedirs(f'{base_dir}/results/lprop+feats', exist_ok=True)
+
     stats = []
     generator = get_and_split(hp.dataset)
     i = 0
@@ -193,43 +210,68 @@ def main(hp):
     has_ae = '+ae' if hp.autoencoder else ''
     has_ae += '+var' if hp.variational else ''
     has_ae += f'+attn-{hp.heads}' if hp.heads else ''
-    for g, tr,va,te in generator:
+
+    for g, tr, va, te in generator:
         y = tr[1]
         y_onehot = to_onehot(y)
 
         per_class = y_onehot.sum(dim=0)
-        weight = y.size(0)-per_class
+        weight = y.size(0) - per_class
 
         model = SageClassifier(
-            hp.dataset, hp.ioc_enc, hp.hidden, (g.y.max()+1).item(), class_weights=weight,
+            hp.dataset, hp.ioc_enc, hp.hidden, (g.y.max() + 1).item(),
+            class_weights=weight,
             layers=hp.layers, aggr=hp.aggr, autoencoder=hp.autoencoder,
             sample_size=hp.sample_size, variational=hp.variational,
             heads=hp.heads
         )
 
-        best,log = train(hp, model, g, *tr, *va, *te)
+        best, log = train(hp, model, g, *tr, *va, *te)
         sd = best.pop('sd')
-        torch.save((sd, model.args, model.kwargs), f'weights/{hp.layers}-layer/gnn_train-{best["va"]:0.3f}_{hp.aggr}_lprop+feats{has_ae}-new-data.pt')
 
-        with open(f'logs/lprop_feats{has_ae}.pkl', 'wb') as f:
+        model_path = f'{base_dir}/weights/{hp.layers}-layer/gnn_train-{best["va"]:0.3f}_{hp.aggr}_lprop+feats{has_ae}-new-data.pt'
+        torch.save((sd, model.args, model.kwargs), model_path)
+        print(f"模型已保存: {model_path}")
+
+        log_path = f'{base_dir}/logs/lprop_feats{has_ae}.pkl'
+        with open(log_path, 'wb') as f:
             pickle.dump(log, f)
+        print(f"日志已保存: {log_path}")
 
         stats.append(best)
 
         model.load_state_dict(sd)
         model.eval()
         preds, ys = get_final_preds(model, g, *te)
-        torch.save((preds,ys), f'predictions/{hp.layers}-layer/lprop_feats_gnn-{has_ae}-{i}.pt')
 
-        i+=1
+        pred_path = f'{base_dir}/predictions/{hp.layers}-layer/lprop_feats_gnn-{has_ae}-{i}.pt'
+        torch.save((preds, ys), pred_path)
+        print(f"预测已保存: {pred_path}")
 
+        i += 1
+
+    # 保存统计结果
     df = pd.DataFrame(stats)
+    print(f"\n{'=' * 70}")
+    print("训练统计结果:")
+    print(f"{'=' * 70}")
     print(df)
-    with open(f'results/lprop+feats/gnn_{hp.layers}-layers{has_ae}.csv', 'a') as f:
+
+    result_path = f'{base_dir}/results/lprop+feats/gnn_{hp.layers}-layers{has_ae}.csv'
+    with open(result_path, 'a') as f:
         f.write(str(hp) + '\n\n')
         df.to_csv(f)
+        f.write('\n均值:\n')
         df.mean().to_csv(f)
+        f.write('\n标准误:\n')
         df.sem().to_csv(f)
+
+    print(f"\n结果已保存: {result_path}")
+    print(f"\n生成的文件:")
+    print(f"  模型权重:  {base_dir}/weights/{hp.layers}-layer/")
+    print(f"  预测结果:  {base_dir}/predictions/{hp.layers}-layer/")
+    print(f"  训练日志:  {base_dir}/logs/")
+    print(f"  统计结果:  {base_dir}/results/lprop+feats/")
 
 
 if __name__ == '__main__':
@@ -240,7 +282,7 @@ if __name__ == '__main__':
     ap.add_argument('-s', '--samples', type=int, default=32)
     ap.add_argument('--aggr', default='max')
     ap.add_argument('--attention', type=int, default=0)
-    ap.add_argument('--dataset', default='otx_dataset-d2e')
+    ap.add_argument('--dataset', default='/root/PythonProject/Trail-main/src/otx_dataset')
     ap.add_argument('--hidden', type=int, default=512)
     ap.add_argument('--ioc_enc', type=int, default=64)
     args = ap.parse_args()
