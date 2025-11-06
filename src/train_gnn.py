@@ -201,7 +201,7 @@ def main(hp):
     os.makedirs(f'{base_dir}/weights/{hp.layers}-layer', exist_ok=True)
     os.makedirs(f'{base_dir}/predictions/{hp.layers}-layer', exist_ok=True)
     os.makedirs(f'{base_dir}/logs', exist_ok=True)
-    os.makedirs(f'{base_dir}/results/lprop+feats', exist_ok=True)
+    os.makedirs(f'{base_dir}/results/feats', exist_ok=True)
 
     stats = []
     generator = get_and_split(hp.dataset)
@@ -229,11 +229,11 @@ def main(hp):
         best, log = train(hp, model, g, *tr, *va, *te)
         sd = best.pop('sd')
 
-        model_path = f'{base_dir}/weights/{hp.layers}-layer/gnn_train-{best["va"]:0.3f}_{hp.aggr}_lprop+feats{has_ae}-new-data.pt'
+        model_path = f'{base_dir}/weights/{hp.layers}-layer/gnn_train-{best["va"]:0.3f}_{hp.aggr}_feats{has_ae}-new-data.pt'
         torch.save((sd, model.args, model.kwargs), model_path)
         print(f"模型已保存: {model_path}")
 
-        log_path = f'{base_dir}/logs/lprop_feats{has_ae}.pkl'
+        log_path = f'{base_dir}/logs/feats{has_ae}.pkl'
         with open(log_path, 'wb') as f:
             pickle.dump(log, f)
         print(f"日志已保存: {log_path}")
@@ -244,7 +244,7 @@ def main(hp):
         model.eval()
         preds, ys = get_final_preds(model, g, *te)
 
-        pred_path = f'{base_dir}/predictions/{hp.layers}-layer/lprop_feats_gnn-{has_ae}-{i}.pt'
+        pred_path = f'{base_dir}/predictions/{hp.layers}-layer/feats_gnn-{has_ae}-{i}.pt'
         torch.save((preds, ys), pred_path)
         print(f"预测已保存: {pred_path}")
 
@@ -257,7 +257,7 @@ def main(hp):
     print(f"{'=' * 70}")
     print(df)
 
-    result_path = f'{base_dir}/results/lprop+feats/gnn_{hp.layers}-layers{has_ae}.csv'
+    result_path = f'{base_dir}/results/feats/gnn_{hp.layers}-layers{has_ae}.csv'
     with open(result_path, 'a') as f:
         f.write(str(hp) + '\n\n')
         df.to_csv(f)
@@ -271,7 +271,7 @@ def main(hp):
     print(f"  模型权重:  {base_dir}/weights/{hp.layers}-layer/")
     print(f"  预测结果:  {base_dir}/predictions/{hp.layers}-layer/")
     print(f"  训练日志:  {base_dir}/logs/")
-    print(f"  统计结果:  {base_dir}/results/lprop+feats/")
+    print(f"  统计结果:  {base_dir}/results/feats/")
 
 
 if __name__ == '__main__':
